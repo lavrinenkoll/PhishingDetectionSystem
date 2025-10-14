@@ -3,8 +3,9 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional
 import requests
 from dotenv import load_dotenv
-from datetime import datetime
+from datetime import datetime, timedelta, UTC
 
+EXPIRED_DAYS = int(os.getenv("EXPIRED_DAYS", 7))
 
 class WebRiskClient:
     BASE_URL = "https://webrisk.googleapis.com/v1/uris:search"
@@ -49,32 +50,31 @@ class WebRiskClient:
             threats = []
             if threat:
                 for t in threat.get("threatTypes", []):
-                    threats.append({"type": t.lower(), "engine": "Google Web Risk"})
+                    threats.append({"engine": "Google Web Risk", "type": t.lower(), "category": "malicious"})
 
-            scan_time = datetime.utcnow().isoformat() + "Z"
+            stats = {
+                "malicious": len(threats),
+                "suspicious": 0,
+                "harmless": 0 if threats else 1,
+                "undetected": 0,
+            }
 
+            time_now = datetime.now(UTC)
+            time_exp = time_now + timedelta(days=EXPIRED_DAYS)
             result = {
-                "url": url,
                 "safe": safe,
-                "threats": threats,
-                "stats": {
-                    "malicious": len(threats),
-                    "suspicious": 0,
-                    "harmless": 0 if threats else 1,
-                    "undetected": 0,
-                },
+                "stats": stats,
                 "details_url": None,
-                "meta": {
-                    "expire_time": threat.get("expireTime") if threat else None,
-                    "scan_time": scan_time,
-                },
                 "raw": resp_json,
+                "checked_at": time_now.isoformat(),
+                "expire_time": time_exp.isoformat(),
             }
 
         except Exception as e:
             result = {"url": url, "error": str(e)}
 
         return result
+
 
     def batch_check(self, urls: List[str], threat_types: Optional[List[str]] = None) -> List[Dict[str, Any]]:
         results = []
@@ -93,28 +93,6 @@ if __name__ == "__main__":
     results = client.batch_check(test_urls)
 
     for result in results:
-        print("\n==== RESULT ====")
-        print(f"URL: {result.get('url')}")
-        if "error" in result:
-            print(f"Error: {result['error']}")
-            continue
-
-        print(f"Safe: {result['safe']}")
-        print(f"Stats: {result['stats']}")
-
-        meta = result.get("meta", {})
-        if meta.get("expire_time"):
-            try:
-                expire = datetime.fromisoformat(meta["expire_time"].replace("Z", "+00:00"))
-                print(f"Threat expires: {expire}")
-            except Exception:
-                print(f"Threat expires: {meta['expire_time']}")
-
-        print("\n---- Threats ----")
-        threats = result.get("threats", [])
-        if not threats:
-            print("No threats detected (clean).")
-        else:
-            for t in threats:
-                print(f"{t['engine']}: {t['type']}")
+        for k, v in result.items():
+            print(f"{k}: {v}")
 

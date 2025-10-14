@@ -1,28 +1,22 @@
+import logging
 import os
+from datetime import datetime, timedelta, UTC
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 import vt
 from dotenv import load_dotenv
 
 
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logger = logging.getLogger(__name__)
+
 PHISHING_RELEVANT_ENGINES = {
-    "Phishtank",
-    "OpenPhish",
-    "PhishLabs",
-    "PhishFort",
-    "Phishing Database",
-    "Google Safebrowsing",
-    "Kaspersky",
-    "BitDefender",
-    "ESET",
-    "Fortinet",
-    "Sophos",
-    "Trustwave",
-    "CyRadar",
-    "SafeToOpen",
-    "Netcraft",
-    "VIPRE",
+    "Phishtank", "OpenPhish", "PhishLabs", "PhishFort", "Phishing Database",
+    "Google Safebrowsing", "Kaspersky", "BitDefender", "ESET", "Fortinet",
+    "Sophos", "Trustwave", "CyRadar", "SafeToOpen", "Netcraft", "VIPRE",
 }
+
+EXPIRED_DAYS = int(os.getenv("EXPIRED_DAYS", 7))
 
 
 class VirusTotalClient:
@@ -68,89 +62,57 @@ class VirusTotalClient:
                 vt_url = client.get_object(f"/urls/{url_id}")
                 all_results = vt_url.last_analysis_results
 
-                relevant_results = []
-                for engine_name, result in all_results.items():
-                    if engine_name in PHISHING_RELEVANT_ENGINES:
-                        relevant_results.append({
-                            "engine": engine_name,
-                            "category": result.get("category"),
-                            "result": result.get("result")
-                        })
-
-                relevant_results.sort(
-                    key=lambda r: (
-                        0 if (r.get("category") == "malicious" or "phishing" in (r.get("result") or "").lower()) else 1
-                    )
-                )
-
-                stats = self._summarize_relevant_stats(relevant_results)
-                safe = stats["malicious"] == 0 and stats["suspicious"] == 0
-
-                threats = [
-                    {"engine": r["engine"], "type": r["result"], "category": r["category"]}
-                    for r in relevant_results
-                ]
-
-                return {
-                    "url": url,
-                    "safe": safe,
-                    "stats": stats,
-                    "threats": threats,
-                    "meta": {
-                        "times_submitted": vt_url.times_submitted,
-                        "scan_date": vt_url.last_analysis_date,
-                        "details_url": f"https://www.virustotal.com/gui/url/{url_id}",
-                    },
-                    "raw": {"analysis_results": relevant_results},
-                }
-
             except vt.error.APIError as e:
                 if e.code == "NotFoundError":
+                    logger.info(f"URL not found in VT, submitting for scan: {url}")
                     analysis = client.scan_url(url, wait_for_completion=True)
-                    return {
-                        "url": url,
-                        "safe": None,
-                        "details": "New scan started",
-                        "analysis_id": analysis.id,
-                    }
-                return {"url": url, "error": str(e)}
-            except Exception as e:
-                return {"url": url, "error": str(e)}
+                    vt_analysis = client.get_object(f"/analyses/{analysis.id}")
 
-    def batch_check(self, urls: List[str]) -> List[Dict[str, Any]]:
-        results = []
-        for u in urls:
-            results.append(self.check_url(u))
-        return results
+                    if not hasattr(vt_analysis, "results") or not vt_analysis.results:
+                        return {"url": url, "error": "No analysis results found after scanning."}
+
+                    all_results = vt_analysis.results
+                    url_id = vt_analysis.id
+                else:
+                    return {"url": url, "error": f"VT API error: {str(e)}"}
+
+            relevant_results = []
+            for engine_name, result in all_results.items():
+                if engine_name in PHISHING_RELEVANT_ENGINES:
+                    relevant_results.append({
+                        "engine": engine_name,
+                        "category": result.get("category"),
+                        "result": result.get("result")
+                    })
+
+            relevant_results.sort(
+                key=lambda r: (
+                    0 if (r.get("category") == "malicious" or "phishing" in (r.get("result") or "").lower()) else 1
+                )
+            )
+
+            stats = self._summarize_relevant_stats(relevant_results)
+            safe = stats["malicious"] == 0 and stats["suspicious"] == 0
+
+            time_now = datetime.now(UTC)
+            time_exp = time_now + timedelta(days=EXPIRED_DAYS)
+            return {
+                "safe": safe,
+                "stats": stats,
+                "details_url": f"https://www.virustotal.com/gui/url/{url_id}",
+                "raw": {"analysis_results": relevant_results},
+                "checked_at": time_now.isoformat(),
+                "expire_time": time_exp.isoformat()
+            }
 
 
 if __name__ == "__main__":
     client = VirusTotalClient()
     test_urls = [
         "https://nor11qtd.forms.app/untitled-form-2",
-        # "http://example.com",
     ]
-    results = client.batch_check(test_urls)
-
-    for result in results:
-        print("\n==== RESULT ====")
-        print(f"URL: {result.get('url')}")
-        if "error" in result:
-            print(f"Error: {result['error']}")
-            continue
-
-        print(f"Safe: {result.get('safe')}")
-        print(f"Stats: {result.get('stats')}")
-        meta = result.get("meta", {})
-        if meta:
-            print(f"Times submitted: {meta.get('times_submitted')}")
-            print(f"Scan date: {meta.get('scan_date')}")
-            print(f"Full report: {meta.get('details_url')}")
-
-        print("\n---- Threats ----")
-        threats = result.get("threats", [])
-        if not threats:
-            print("No phishing-related threats detected.")
-        else:
-            for t in threats:
-                print(f"{t['engine']}: {t['category']} ({t['type']})")
+    for u in test_urls:
+        result = client.check_url(u)
+        print("\n=== VirusTotal result ===")
+        for k, v in result.items():
+            print(f"{k}: {v}")
