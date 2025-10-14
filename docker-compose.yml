@@ -1,0 +1,54 @@
+services:
+  db:
+    image: postgres:15
+    container_name: postgres
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+    ports:
+      - "${POSTGRES_PORT}:${POSTGRES_PORT}"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  history_service:
+    build: ./services/history_service
+    container_name: history_service
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=${HISTORY_DATABASE_URL}
+      - APP_HOST=${HISTORY_APP_HOST}
+      - APP_PORT=${HISTORY_APP_PORT}
+    ports:
+      - "${HISTORY_APP_PORT}:${HISTORY_APP_PORT}"
+    depends_on:
+      - db
+    restart: unless-stopped
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -f http://${HISTORY_APP_HOST}:${HISTORY_APP_PORT}/health || exit 1" ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  threat-intel:
+    build: ./services/threat_intel
+    container_name: threat-intel
+    ports:
+      - "${THREAT_INTEL_PORT}:${THREAT_INTEL_PORT}"
+    env_file:
+      - .env
+    restart: unless-stopped
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -f http://localhost:${THREAT_INTEL_PORT}/health || exit 1" ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+#    depends_on:
+#        - db
+#        - history_service
+
+volumes:
+  pgdata:
