@@ -1,3 +1,4 @@
+import base64
 import os
 import logging
 import re
@@ -6,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
 from typing import Tuple
+from google.genai import types
 
 from page_extractor import PageExtractor
 
@@ -25,11 +27,11 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger(__name__)
 
 EXPIRED_DAYS = int(os.getenv("EXPIRED_DAYS", 7))
-AI_API_KEY = os.getenv("GOOGLE_AI_API")
-MODEL = os.getenv("MODEL", "gemini-2.5-flash-lite")
+GOOGLE_AI_API = os.getenv("GOOGLE_AI_API")
+GOOGLE_AI_MODEL = os.getenv("GOOGLE_AI_MODEL", "gemini-2.5-flash-lite")
 PAGE_FETCH_TIMEOUT = int(os.getenv("PAGE_FETCH_TIMEOUT", 2))
 
-if not AI_API_KEY:
+if not GOOGLE_AI_API:
     logger.warning("GOOGLE_AI_API is not set. AI calls will fail if attempted.")
 
 _ai_client = None
@@ -39,28 +41,36 @@ def get_ai_client():
     if _ai_client is None:
         if genai is None:
             raise RuntimeError("google.genai client library is not installed or importable.")
-        _ai_client = genai.Client(api_key=AI_API_KEY)
+        _ai_client = genai.Client(api_key=GOOGLE_AI_API)
     return _ai_client
 
 
 def build_prompt(full_html: str, original_url: str, final_url: str) -> str:
     prompt = f"""
 You are a security content analyzer.
-Analyze the following FULL HTML page content (including text and any form markup). Consider:
-- visible text and language suggesting urgency or credential harvesting ("verify", "confirm", "update", "enter password", "secure your account", etc.);
-- presence of input fields for passwords, credit cards, or personal identifiers (check <input> types and placeholders and form actions);
-- deceptive links that point to external hosts or suspicious domains relative to the original domain;
-- fake login prompts, hidden forms, or forms that POST to external domains.
-Do NOT output any extra commentary, headings, or formatting. Output STRICTLY in this exact format (in plain text):
+Analyze the following FULL HTML page content. You may also use the provided PAGE SCREENSHOT IMAGE as supplemental information.
+
+Your task:
+Detect possible phishing or impersonation attempts based on both textual and visual indicators.
+
+Consider:
+- visible text or language suggesting urgency, fear, or credential harvesting ("verify", "confirm", "update", "enter password", "secure your account", etc.);
+- presence of input fields for passwords, credit cards, or personal identifiers (<input>, <form> actions);
+- deceptive links that point to external or mismatched domains;
+- fake login prompts, cloned UI layouts, or reused branding;
+- visual indicators of impersonation or suspicious branding (logos, trademarks, layouts), if clearly visible in the screenshot;
+- suspicious or mismatched branding (e.g., the HTML claims to be from PayPal, but the logo or color palette doesn't match).
+
+Do NOT output any extra commentary, headings, or formatting.
+Output STRICTLY in this exact format (plain text only):
 
 1) True or False
 2) Explanation in 2-5 sentences.
 
 Rules:
 - Line 1 must be exactly "1) True" or "1) False".
-- Line 2 must be exactly "2) " followed by a brief explanation (no more than 1000 characters).
-- No extra lines, no JSON, no markdown, no explanation of the format.
-- Keep the sentence factual and dry (no marketing text, no empathy, no "I think", no "maybe").
+- Line 2 must start with "2) " followed by a short explanation (≤1000 characters).
+- No markdown, no JSON, no extra lines, no self-reference.
 
 Original page URL: {original_url}
 Final URL: {final_url}
@@ -132,6 +142,7 @@ def analyze_page():
     logger.info("Page fetched successfully: %s", url)
     html = fetched.get("html", "")
     final_url = fetched.get("final_url", url)
+    screenshot_base64 = fetched.get("screenshot_base64", "")
 
     prompt = build_prompt(html, url, final_url)
 
@@ -141,9 +152,32 @@ def analyze_page():
         logger.exception("AI client init failed")
         return jsonify({"url": url, "error": f"AI client init failed: {e}"}), 500
 
-    logger.info("Sending content to AI model for analysis: %s", MODEL)
+    logger.info("Sending content to AI model for analysis: %s", GOOGLE_AI_MODEL)
+
     try:
-        response = client.models.generate_content(model=MODEL, contents=prompt)
+        contents = [prompt]
+
+        if screenshot_base64.startswith("data:image"):
+            match = re.match(r"data:(image/\w+);base64,(.*)", screenshot_base64)
+            if match:
+                mime_type = match.group(1)
+                encoded_data = match.group(2)
+                image_bytes = base64.b64decode(encoded_data)
+                image_part = types.Part.from_bytes(data=image_bytes, mime_type=mime_type)
+                contents.append(image_part)
+
+        logger.info("AI content prepared, starting generation...")
+
+        response_text = ""
+        for chunk in client.models.generate_content_stream(
+                model=GOOGLE_AI_MODEL,
+                contents=contents
+        ):
+            if hasattr(chunk, "text") and chunk.text:
+                response_text += chunk.text
+
+        response = response_text
+
         ai_text = ""
         if hasattr(response, "text"):
             ai_text = response.text

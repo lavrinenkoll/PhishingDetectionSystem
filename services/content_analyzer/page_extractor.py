@@ -1,10 +1,15 @@
 import json
+import math
 import random
 import time
 import logging
 from typing import Dict, Any, List, Optional
 from urllib.parse import urlparse
-
+from io import BytesIO
+import base64
+import tempfile
+from PIL import Image
+import requests
 from selenium import webdriver
 from selenium.webdriver import ChromeOptions
 from selenium.webdriver.common.desired_capabilities import DesiredCapabilities
@@ -65,6 +70,8 @@ class PageExtractor:
 
     def _make_driver(self) -> webdriver.Chrome:
         options = ChromeOptions()
+        tmp_profile = tempfile.mkdtemp()
+        options.add_argument(f"--user-data-dir={tmp_profile}")
 
         options.add_argument("--window-size=1366,768")
 
@@ -76,6 +83,7 @@ class PageExtractor:
         options.add_argument("--disable-dev-shm-usage")
         options.add_experimental_option("excludeSwitches", ["enable-automation"])
         options.add_experimental_option("useAutomationExtension", False)
+        options.add_argument("--disable-gpu")
 
         caps = DesiredCapabilities.CHROME.copy()
         caps["goog:loggingPrefs"] = {"performance": "ALL"}
@@ -192,6 +200,39 @@ Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
 
         return {"text": visible_text, "features": features}
 
+    @staticmethod
+    def image_to_base64(source: str | bytes, max_width: int = 400, max_height: int = 400) -> str:
+        try:
+            if isinstance(source, str):
+                resp = requests.get(source, timeout=5)
+                resp.raise_for_status()
+                img = Image.open(BytesIO(resp.content))
+            else:
+                img = Image.open(BytesIO(source))
+
+            img.thumbnail((max_width, max_height))
+            buffered = BytesIO()
+            img.save(buffered, format="JPEG", quality=70)
+            b64_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
+            logger.debug(f"Converted image to base64")
+            return f"data:image/jpeg;base64,{b64_str}"
+        except Exception as e:
+            logger.debug(f"Failed to convert image to base64: {e}")
+            return ""
+
+
+    def _calc_compression_coef(self, width: int, height: int) -> float:
+        total_pixels = width * height
+        limit = 1_000_000
+
+        if total_pixels > limit:
+            coef = math.sqrt(limit / total_pixels)
+        else:
+            coef = 1.0
+
+        return max(coef, 0.05)
+
+
     def fetch(self, url: str, timeout_after_load: int = 2) -> Dict[str, Any]:
         result: Dict[str, Any] = {"url": url, "status": "error", "error": None}
         try:
@@ -206,9 +247,31 @@ Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
             driver.get(url)
             self._human_interaction_sim(driver)
             time.sleep(timeout_after_load)
+
             final_url = driver.current_url
             raw_html = driver.page_source
             cookies = driver.get_cookies()
+
+            total_height = driver.execute_script("return document.body.scrollHeight")
+            total_width = driver.execute_script("return document.body.scrollWidth")
+            driver.set_window_size(total_width, total_height)
+            time.sleep(0.3)
+            png = driver.get_screenshot_as_png()
+            img = Image.open(BytesIO(png))
+
+            coef = self._calc_compression_coef(img.width, img.height)
+            screenshot_bytes = base64.b64decode(base64.b64encode(png))
+            screenshot_base64 = self.image_to_base64(
+                screenshot_bytes,
+                max_width=int(img.width * coef),
+                max_height=int(img.height * coef)
+            )
+
+            with open("base64_screenshot.txt", "w", encoding="utf-8") as f:
+                f.write(screenshot_base64)
+
+            soup = BeautifulSoup(raw_html, "html.parser")
+            visible_text = soup.get_text(separator=" ", strip=True)[:200000]
 
             extracted = self._extract_relevant(raw_html, final_url)
 
@@ -216,7 +279,8 @@ Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
                 "status": "ok",
                 "final_url": final_url,
                 "html": raw_html,
-                "text": extracted["text"],
+                "text": visible_text,
+                "screenshot_base64": screenshot_base64,
                 "features": extracted["features"],
                 "cookies": cookies
             })
@@ -238,43 +302,11 @@ Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
                 pass
             self.driver = None
 
+
 # Example usage:
 if __name__ == "__main__":
-    extractor = PageExtractor(headless=False)
+    extractor = PageExtractor(headless=True)
     url_to_test = "https://nor11qtd.forms.app/untitled-form-2"
-    url_to_test = "https://btmailee.flazio.com/home?r=25915"
+    # url_to_test = "https://btmailee.flazio.com/home?r=25915"
     data = extractor.fetch(url_to_test)
     print(json.dumps(data, indent=2))
-
-#     text = data.get("html", "")
-#     final_url = data.get("final_url", url_to_test)
-#     # get key from env
-#     from dotenv import load_dotenv
-#     load_dotenv()
-#     import os
-#     GOOGLE_AI_API = os.getenv("GOOGLE_AI_API")
-#     from google import genai
-#     client = genai.Client(api_key=GOOGLE_AI_API)
-#
-#     prompt = f"""
-# You are a security content analyzer.
-# Analyze the following HTML page content and determine whether it shows phishing characteristics.
-# Look for signs such as:
-# - forms requesting passwords, credit card numbers, or personal data;
-# - deceptive links or domain names;
-# - fake login prompts;
-# - urgent or manipulative language asking for user actions (e.g., "verify now", "update account", "confirm your identity").
-#
-# Output strictly in the following format:
-# 1) True or False — True if the page is likely phishing, False if not.
-# 2) Explanation (no more than 10 sentences) of the reasoning behind your conclusion. Human (no it education) that will read this should understand why you made that decision.
-#
-# Original page URL: {url_to_test}
-# Final URL: {final_url}
-# HTML content:
-# {text}
-# """
-#     response = client.models.generate_content(
-#         model="gemini-2.5-flash-lite", contents=prompt)
-#     print("AI Analysis Response:")
-#     print(response.text)
