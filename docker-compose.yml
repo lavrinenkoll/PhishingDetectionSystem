@@ -31,11 +31,10 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 10s
 
   threat-intel:
     build: ./services/threat_intel
-    container_name: threat-intel
+    container_name: "${THREAT_INTEL_CONTAINER_NAME}"
     ports:
       - "${THREAT_INTEL_PORT}:${THREAT_INTEL_PORT}"
     env_file:
@@ -46,9 +45,44 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
-#    depends_on:
-#        - db
-#        - history_service
+
+  domain-analyzer:
+    build: ./services/domain_analyzer
+    container_name: "${DOMAIN_ANALYZER_CONTAINER_NAME}"
+    ports:
+      - "${DOMAIN_ANALYZER_PORT}:${DOMAIN_ANALYZER_PORT}"
+    env_file:
+      - .env
+    restart: unless-stopped
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -f http://localhost:${DOMAIN_ANALYZER_PORT}/health || exit 1" ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  content-analyzer:
+    build: ./services/content_analyzer
+    container_name: "${CONTENT_ANALYZER_CONTAINER_NAME}"
+    ports:
+      - "${CONTENT_ANALYZER_PORT}:${CONTENT_ANALYZER_PORT}"
+    env_file:
+      - .env
+    restart: unless-stopped
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -f http://localhost:${CONTENT_ANALYZER_PORT}/health || exit 1" ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    cpus: 0.5
+    mem_limit: 512M
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,size=100m
+      - /home/seluser/.cache:rw,size=50m
+      - /dev/shm:rw,size=256m
 
 volumes:
   pgdata:
