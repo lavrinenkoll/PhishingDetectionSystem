@@ -126,87 +126,77 @@ extractor = PageExtractor(headless=True)
 
 
 @app.route("/analyze_content", methods=["POST"])
-def analyze_page():
+def analyze_generic():
     data = request.get_json(force=True)
-    url = data.get("url")
-    if not url:
-        return jsonify({"error": "No URL provided"}), 400
 
-    logger.info("Received analyze request for: %s", url)
-    fetched = extractor.fetch(url, timeout_after_load=PAGE_FETCH_TIMEOUT)
+    html = data.get("html", "")
+    url = data.get("url", "")
+    screenshot_base64 = data.get("screenshot_base64", "")
+    original_url = url or data.get("original_url", "unknown")
+    final_url = data.get("final_url", original_url)
 
-    if fetched.get("status") != "ok":
-        logger.error("Page fetch failed: %s", fetched.get("error"))
-        return jsonify({"url": url, "error": fetched.get("error")}), 500
+    if not html and not url:
+        return jsonify({"error": "Must provide either 'url' or 'html'"}), 400
 
-    logger.info("Page fetched successfully: %s", url)
-    html = fetched.get("html", "")
-    final_url = fetched.get("final_url", url)
-    screenshot_base64 = fetched.get("screenshot_base64", "")
+    if url and not html:
+        logger.info("Fetching page from URL: %s", url)
+        fetched = extractor.fetch(url, timeout_after_load=PAGE_FETCH_TIMEOUT)
+        if fetched.get("status") != "ok":
+            logger.error("Page fetch failed: %s", fetched.get("error"))
+            return jsonify({"url": url, "error": fetched.get("error")}), 500
+        html = fetched.get("html", "")
+        final_url = fetched.get("final_url", url)
+        screenshot_base64 = fetched.get("screenshot_base64", "")
 
-    prompt = build_prompt(html, url, final_url)
+    if not html:
+        return jsonify({"error": "No HTML to analyze"}), 400
+
+    logger.info("Analyzing page: %s", original_url)
+    prompt = build_prompt(html, original_url, final_url)
 
     try:
         client = get_ai_client()
     except Exception as e:
         logger.exception("AI client init failed")
-        return jsonify({"url": url, "error": f"AI client init failed: {e}"}), 500
+        return jsonify({"error": f"AI client init failed: {e}"}), 500
 
-    logger.info("Sending content to AI model for analysis: %s", GOOGLE_AI_MODEL)
+    contents = [prompt]
+
+    if screenshot_base64.startswith("data:image"):
+        match = re.match(r"data:(image/\w+);base64,(.*)", screenshot_base64)
+        if match:
+            mime_type, encoded = match.groups()
+            image_bytes = base64.b64decode(encoded)
+            image_part = types.Part.from_bytes(data=image_bytes, mime_type=mime_type)
+            contents.append(image_part)
 
     try:
-        contents = [prompt]
-
-        if screenshot_base64.startswith("data:image"):
-            match = re.match(r"data:(image/\w+);base64,(.*)", screenshot_base64)
-            if match:
-                mime_type = match.group(1)
-                encoded_data = match.group(2)
-                image_bytes = base64.b64decode(encoded_data)
-                image_part = types.Part.from_bytes(data=image_bytes, mime_type=mime_type)
-                contents.append(image_part)
-
-        logger.info("AI content prepared, starting generation...")
-
+        logger.info("Sending data to model: %s", GOOGLE_AI_MODEL)
         response_text = ""
         for chunk in client.models.generate_content_stream(
-                model=GOOGLE_AI_MODEL,
-                contents=contents
+            model=GOOGLE_AI_MODEL,
+            contents=contents
         ):
             if hasattr(chunk, "text") and chunk.text:
                 response_text += chunk.text
 
-        response = response_text
+        response_text = response_text.strip().replace("```json", "").replace("```", "")
+        response_text = re.sub(r"\\'", "'", response_text)
 
-        ai_text = ""
-        if hasattr(response, "text"):
-            ai_text = response.text
-        elif isinstance(response, dict) and "candidates" in response:
-            cand = response["candidates"]
-            if cand:
-                ai_text = cand[0].get("content") or cand[0].get("text") or ""
-        else:
-            ai_text = str(response)
+        verdict_bool, explanation, raw_ai = parse_ai_response(response_text)
+        now = datetime.now(timezone.utc)
+
+        return jsonify({
+            "verdict": verdict_bool,
+            "explanation": explanation,
+            "raw_ai": raw_ai,
+            "checked_at": now.isoformat(),
+            "expire_time": (now + timedelta(days=EXPIRED_DAYS)).isoformat()
+        })
+
     except Exception as e:
         logger.exception("AI call failed")
-        return jsonify({"url": url, "error": f"AI call failed: {e}"}), 500
-    ai_end = datetime.now(timezone.utc)
-
-    verdict_bool, explanation, raw_ai = parse_ai_response(ai_text)
-
-    checked_at = ai_end.isoformat()
-    expire_time = (ai_end + timedelta(days=EXPIRED_DAYS)).isoformat()
-
-    result = {
-        "verdict": verdict_bool,
-        "explanation": explanation,
-        "raw_ai": raw_ai,
-        "checked_at": checked_at,
-        "expire_time": expire_time
-    }
-
-    logger.info("Analysis finished for %s: verdict=%s", url, verdict_bool)
-    return jsonify(result), 200
+        return jsonify({"error": f"AI call failed: {e}"}), 500
 
 
 @app.route("/health", methods=["GET"])
