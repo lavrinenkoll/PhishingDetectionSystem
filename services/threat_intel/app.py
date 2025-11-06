@@ -58,7 +58,7 @@ def health():
 
 
 if __name__ == "__main__":
-    port = int(os.getenv("THREAT_INTEL_PORT", 8000))
+    port = int(os.getenv("THREAT_INTEL_PORT", 8001))
     host = os.getenv("THREAT_INTEL_HOST", "0.0.0.0")
     logger.info(f"Starting Threat Intelligence Service on {host}:{port}")
     app.run(host=host, port=port)

@@ -84,5 +84,31 @@ services:
       - /home/seluser/.cache:rw,size=50m
       - /dev/shm:rw,size=256m
 
+  behavior-analyzer:
+    build: ./services/behavior_analyzer
+    container_name: "${BEHAVIOR_ANALYZER_CONTAINER_NAME}"
+    ports:
+      - "${BEHAVIOR_ANALYZER_PORT}:${BEHAVIOR_ANALYZER_PORT}"
+    env_file:
+      - .env
+    restart: unless-stopped
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -f http://localhost:${BEHAVIOR_ANALYZER_PORT}/health || exit 1" ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    cpus: 6
+    mem_limit: 6G
+    shm_size: "4g"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,size=3g
+      - /dev/shm:rw,size=6g
+    depends_on:
+      - content-analyzer
+
 volumes:
   pgdata:
