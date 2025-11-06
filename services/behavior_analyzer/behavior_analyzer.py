@@ -13,7 +13,7 @@ from typing import List, Dict, Any, Optional
 
 from dotenv import load_dotenv
 from PIL import Image
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Comment
 from selenium import webdriver
 from selenium.webdriver import ChromeOptions
 from selenium.webdriver.chrome.service import Service
@@ -203,6 +203,27 @@ def get_full_dom(driver):
     except Exception as e:
         print(f"Failed to get full DOM: {e}")
         return driver.page_source
+
+
+def clean_html_for_analysis(html: str) -> BeautifulSoup:
+    soup = BeautifulSoup(html, "html.parser")
+
+    for tag in soup([
+        "script", "style", "link", "meta", "noscript", "canvas", "video", "svg"
+    ]):
+        tag.decompose()
+
+    for tag in soup.find_all("script", {"type": "application/json"}):
+        tag.decompose()
+
+    for comment in soup.find_all(string=lambda x: isinstance(x, Comment)):
+        comment.extract()
+
+    important_attrs = {"type", "name", "placeholder", "value", "href", "id", "class", "aria-label", "for", "role"}
+    for tag in soup.find_all():
+        tag.attrs = {k: v for k, v in tag.attrs.items() if k in important_attrs}
+
+    return soup
 
 
 def ask_model_for_actions(html: str, screenshot_b64: str) -> Dict[str, Any]:
@@ -462,6 +483,7 @@ class BehavioralAnalyzer:
                         screen_b64, png_new = self.get_screenshot_base64()
                         # with open(f"action_{idx+1}_screenshot.png", "wb") as f:
                         #     f.write(png_new)
+                        dom_after = clean_html_for_analysis(dom_after).prettify()
                         content_report = self.ask_content_analyzer(dom_after, self.driver.current_url, screen_b64)
                         logger.info("Content analyzer report: %s", content_report)
 
@@ -529,6 +551,7 @@ class BehavioralAnalyzer:
             # with open(f"page_{filename}.html", "w", encoding="utf-8") as f:
             #     f.write(html)
 
+            html = clean_html_for_analysis(html).prettify()
             res = ask_model_for_actions(html, screenshot_b64)
             if res.get("status") == "no_actions":
                 logger.info("No user actions detected on the page.")
@@ -563,7 +586,7 @@ if __name__ == "__main__":
     test_url = "https://btmailee.flazio.com/home?r=25915"
     # test_url = "https://btinternetbills.framer.ai/?editSite"
     # test_url = "https://nm2rhgsu.forms.app/phishing-example-diploma"
-    test_url = "https://billblundell1.wixsite.com/my-site-2"
+    # test_url = "https://billblundell1.wixsite.com/my-site-2"
     analyzer.analyze(test_url)
     if not HEADLESS:
         input("Press Enter to exit...")
