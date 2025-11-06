@@ -14,7 +14,7 @@ from selenium import webdriver
 from selenium.webdriver import ChromeOptions
 from selenium.webdriver.common.desired_capabilities import DesiredCapabilities
 from selenium.common.exceptions import WebDriverException, TimeoutException
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Comment
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -200,6 +200,19 @@ Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
 
         return {"text": visible_text, "features": features}
 
+
+    def _calc_compression_coef(self, width: int, height: int) -> float:
+        total_pixels = width * height
+        limit = 700_000
+
+        if total_pixels > limit:
+            coef = math.sqrt(limit / total_pixels)
+        else:
+            coef = 1.0
+
+        return max(coef, 0.05)
+
+
     @staticmethod
     def image_to_base64(source: str | bytes, max_width: int = 400, max_height: int = 400) -> str:
         try:
@@ -221,16 +234,26 @@ Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
             return ""
 
 
-    def _calc_compression_coef(self, width: int, height: int) -> float:
-        total_pixels = width * height
-        limit = 1_000_000
+    @staticmethod
+    def clean_html_for_analysis(html: str) -> BeautifulSoup:
+        soup = BeautifulSoup(html, "html.parser")
 
-        if total_pixels > limit:
-            coef = math.sqrt(limit / total_pixels)
-        else:
-            coef = 1.0
+        for tag in soup([
+            "script", "style", "link", "meta", "noscript", "canvas", "video", "svg"
+        ]):
+            tag.decompose()
 
-        return max(coef, 0.05)
+        for tag in soup.find_all("script", {"type": "application/json"}):
+            tag.decompose()
+
+        for comment in soup.find_all(string=lambda x: isinstance(x, Comment)):
+            comment.extract()
+
+        important_attrs = {"type", "name", "placeholder", "value", "href", "id", "class", "aria-label", "for", "role"}
+        for tag in soup.find_all():
+            tag.attrs = {k: v for k, v in tag.attrs.items() if k in important_attrs}
+
+        return soup
 
 
     def fetch(self, url: str, timeout_after_load: int = 2) -> Dict[str, Any]:
@@ -267,9 +290,10 @@ Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
                 max_height=int(img.height * coef)
             )
 
-            with open("base64_screenshot.txt", "w", encoding="utf-8") as f:
-                f.write(screenshot_base64)
+            # with open("base64_screenshot.txt", "w", encoding="utf-8") as f:
+            #     f.write(screenshot_base64)
 
+            raw_html = self.clean_html_for_analysis(raw_html).prettify()
             soup = BeautifulSoup(raw_html, "html.parser")
             visible_text = soup.get_text(separator=" ", strip=True)[:200000]
 
@@ -308,5 +332,6 @@ if __name__ == "__main__":
     extractor = PageExtractor(headless=True)
     url_to_test = "https://nor11qtd.forms.app/untitled-form-2"
     # url_to_test = "https://btmailee.flazio.com/home?r=25915"
+    url_to_test = "https://billblundell1.wixsite.com/my-site-2"
     data = extractor.fetch(url_to_test)
     print(json.dumps(data, indent=2))
