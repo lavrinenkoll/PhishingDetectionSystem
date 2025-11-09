@@ -102,7 +102,7 @@ class VirusTotalDomainClient:
                 "stats": stats,
                 "details_url": f"https://www.virustotal.com/gui/domain/{domain}",
                 "raw": {"analysis_results": relevant_results},
-                "checked_at": time_now.isoformat(),
+                "last_checked_at": time_now.isoformat(),
                 "expire_time": time_exp.isoformat()
             }
 

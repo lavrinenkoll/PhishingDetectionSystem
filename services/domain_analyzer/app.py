@@ -36,9 +36,14 @@ def check_domain():
         vt_result = vt_domain_client.check_domain(url)
 
         logger.info(f"Check completed: {url} | Safe: {vt_result.get('safe', True)}")
+        last_checked_at = vt_result.get("last_checked_at", None)
+        expire_time = vt_result.get("expire_time", None)
         return jsonify({
             "url": url,
-            "virustotal_domain": vt_result
+            "virustotal_domain": vt_result,
+            "last_checked_at": last_checked_at,
+            "expire_time": expire_time,
+            "safe": vt_result.get("safe", True)
         })
 
     except Exception as e:
