@@ -100,13 +100,8 @@ def image_to_base64(source: str | bytes, max_width: int = 400, max_height: int =
 def make_driver(headless=True, user_agent=None):
     options = ChromeOptions()
 
-    profile_dir = "/tmp/chrome-profile"
-    try:
-        os.makedirs(profile_dir, exist_ok=True)
-        os.chmod(profile_dir, 0o777)
-        options.add_argument(f"--user-data-dir={profile_dir}")
-    except Exception as e:
-        logger.warning("Failed to create profile dir %s: %s", profile_dir, e)
+    profile_dir = tempfile.mkdtemp(prefix="chrome-profile-")
+    options.add_argument(f"--user-data-dir={profile_dir}")
 
     options.add_argument("--window-size=1366,768")
     if headless:
@@ -470,7 +465,7 @@ class BehavioralAnalyzer:
 
                 url_after = self.driver.current_url
                 if url_before != url_after:
-                    time.sleep(5)
+                    time.sleep(15)
                     url_after = self.driver.current_url
                     logger.info("URL changed from %s to %s", url_before, url_after)
 
