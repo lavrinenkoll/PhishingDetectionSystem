@@ -1,9 +1,9 @@
+import json
 import os
 import logging
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
 from behavior_analyzer import BehavioralAnalyzer
-import re
 from datetime import datetime, timedelta, timezone
 
 try:
@@ -175,70 +175,29 @@ def build_prompt(summary_payload: dict) -> str:
     timeline_text = "\n\n".join(timeline)
 
     prompt = f"""
-You are a professional cybersecurity analyst specializing in phishing detection, credential harvesting analysis, and behavioral threat forensics.
+    You are a professional cybersecurity analyst specializing in phishing detection, credential harvesting analysis, and behavioral threat forensics.
 
-Carefully analyze the *entire chain of interaction*, not only single-page indicators.  
-Pay specific attention to:
-- Whether the user is guided toward entering login credentials
-- How redirections change the domain trust profile over time
-- Whether behavior resembles impersonation of a known service
-- Whether redirects lead to legitimate authentication or mimicry / spoofing
-- How content, domain reputation, and UI interactions reinforce each other
+    Carefully analyze the entire chain of interaction, not only single-page indicators.
+    Pay specific attention to:
+    - Whether the user is guided toward entering login credentials
+    - How redirections change the domain trust profile over time
+    - Whether behavior resembles impersonation of a known service
+    - Whether redirects lead to legitimate authentication or mimicry / spoofing
+    - How content, domain reputation, and UI interactions reinforce each other
 
-Start URL (initial user entry point):
-{origin}
+    Start URL (initial user entry point):
+    {origin}
 
-Observed redirection chain (chronological):
-{redirect_text}
+    Observed redirection chain (chronological):
+    {redirect_text}
 
-Cross-service evaluation and reconstructed user interaction timeline:
-{timeline_text}
+    Cross-service evaluation and reconstructed user interaction timeline:
+    {timeline_text}
 
-Your output must decide whether the overall flow represents a **coordinated phishing attempt** aimed at credential theft, brand impersonation, or user deception.
-
-Return your conclusion in this exact format:
-
-1) True or False — does this scenario represent phishing behavior overall?
-2) A detailed explanation (4–10 full sentences) referencing *specific facts from the evidence above*, such as:
-   - malicious detections
-   - login form impersonation patterns
-   - forced authentication redirect flows
-   - user interaction triggers leading to domain transition
-   - mismatch between branding and hosting platform
-   - suspicious UI/UX patterns designed to collect credentials
-
-Do not summarize the evidence list — instead, synthesize it into a coherent reasoning chain.
-
-No bullet lists. No markdown. No disclaimers. No advice. Just the verdict + rationale.
-""".strip()
+    Based on this, decide whether the overall flow represents a coordinated phishing attempt aimed at credential theft, brand impersonation, or user deception. Your reasoning should be reflected in a clear, coherent explanation.
+    """.strip()
 
     return prompt
-
-
-def parse_ai_response(text: str):
-    raw = text.strip()
-
-    cleaned = re.sub(r"[*_#>`]+", "", raw)
-    cleaned = re.sub(r"\s+", " ", cleaned).strip()
-
-    verdict_match = re.search(r"1\)\s*(True|False)", cleaned, re.IGNORECASE)
-    verdict = False
-    if verdict_match:
-        verdict = verdict_match.group(1).lower() == "true"
-
-    explanation_match = re.search(r"2\)\s*(.+)", cleaned, re.IGNORECASE)
-    if explanation_match:
-        explanation = explanation_match.group(1).strip()
-    else:
-        parts = re.split(r"1\)\s*(?:True|False)", cleaned, flags=re.IGNORECASE)
-        if len(parts) > 1:
-            explanation = parts[1].strip()
-        else:
-            explanation = cleaned
-
-    explanation = explanation.strip()
-
-    return verdict, explanation, raw
 
 
 @app.route("/get_summary", methods=["POST"])
@@ -253,24 +212,48 @@ def behavior_summary():
 
     try:
         client = get_ai_client()
-        response_text = ""
+        phishing_schema = {
+            "type": "object",
+            "properties": {
+                "is_phishing": {
+                    "type": "boolean",
+                    "description": "True if this is phishing / credential theft flow, otherwise False."
+                },
+                "explanation": {
+                    "type": "string",
+                    "description": "Detailed explanation (4–10 sentences) using concrete evidence from the timeline."
+                }
+            },
+            "required": ["is_phishing", "explanation"],
+            "additionalProperties": False,
+        }
 
-        for chunk in client.models.generate_content_stream(
+        response = client.models.generate_content(
             model=GOOGLE_AI_MODEL,
-            contents=[prompt]
-        ):
-            if hasattr(chunk, "text") and chunk.text:
-                response_text += chunk.text
+            contents=prompt,
+            config={
+                "temperature": 0.1,
+                "top_p": 0.9,
+                "max_output_tokens": 1500,
+                "seed": 0,
+                "response_mime_type": "application/json",
+                "response_json_schema": phishing_schema,
+            },
+        )
 
-        verdict, explanation, raw_ai = parse_ai_response(response_text)
+        data = json.loads(response.text)
+
+        verdict = bool(data.get("is_phishing", False))
+        explanation = str(data.get("explanation", "")).strip()
         now = datetime.now(timezone.utc)
 
         return jsonify({
             "verdict": verdict,
             "explanation": explanation,
-            "raw_ai": raw_ai,
+            "raw_ai": response.text,
             "checked_at": now.isoformat(),
-            "expire_time": (now + timedelta(days=EXPIRED_DAYS)).isoformat()
+            "expire_time": (now + timedelta(days=EXPIRED_DAYS)).isoformat(),
+            "summary_payload": summary_payload
         })
 
     except Exception as e:
