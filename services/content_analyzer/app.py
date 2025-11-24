@@ -1,4 +1,5 @@
 import base64
+import json
 import os
 import logging
 import re
@@ -6,7 +7,6 @@ from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
-from typing import Tuple
 from google.genai import types
 
 from page_extractor import PageExtractor
@@ -45,9 +45,31 @@ def get_ai_client():
     return _ai_client
 
 
+CONTENT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "is_phishing": {
+            "type": "boolean",
+            "description": "True if the page content represents phishing or impersonation, otherwise False."
+        },
+        "explanation": {
+            "type": "string",
+            "description": "Explanation (4–6 sentences) describing why the content is or is not phishing."
+        }
+    },
+    "required": ["is_phishing", "explanation"],
+    "additionalProperties": False,
+}
+
+
+app = Flask(__name__)
+extractor = PageExtractor(headless=True)
+
+
 def build_prompt(full_html: str, original_url: str, final_url: str) -> str:
     prompt = f"""
 You are a security content analyzer.
+
 Analyze the following FULL HTML page content. You may also use the provided PAGE SCREENSHOT IMAGE as supplemental information.
 
 Your task:
@@ -61,68 +83,15 @@ Consider:
 - visual indicators of impersonation or suspicious branding (logos, trademarks, layouts), if clearly visible in the screenshot;
 - suspicious or mismatched branding (e.g., the HTML claims to be from PayPal, but the logo or color palette doesn't match).
 
-Do NOT output any extra commentary, headings, or formatting.
-Output STRICTLY in this exact format (plain text only):
-
-1) True or False
-2) Explanation in 2-5 sentences.
-
-Rules:
-- Line 1 must be exactly "1) True" or "1) False".
-- Line 2 must start with "2) " followed by a short explanation (≤1000 characters).
-- No markdown, no JSON, no extra lines, no self-reference.
+Your analysis should clearly state whether the page is likely involved in phishing or impersonation, and explain why, referencing concrete aspects of the HTML and, if relevant, the visual layout.
 
 Original page URL: {original_url}
 Final URL: {final_url}
+
 HTML:
 {full_html}
 """
     return prompt.strip()
-
-
-def parse_ai_response(text: str) -> Tuple[bool, str, str]:
-    raw = text.strip()
-    cleaned = re.sub(r"[*_#>`]+", "", raw)
-    cleaned = re.sub(r"\s+", " ", cleaned).strip()
-
-    lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
-    verdict = False
-    explanation = ""
-
-    if len(lines) >= 1:
-        first = lines[0]
-        if "true" in first.lower():
-            verdict = True
-        elif "false" in first.lower():
-            verdict = False
-        else:
-            if "true" in cleaned.lower():
-                verdict = True
-            elif "false" in cleaned.lower():
-                verdict = False
-
-    m = re.split(r"1\)\s*(?:True|False)\s*2\)\s*", cleaned, flags=re.IGNORECASE)
-    if len(m) >= 2 and m[1].strip():
-        explanation = m[1].strip()
-    elif len(lines) >= 2:
-        explanation = lines[1]
-    else:
-        explanation = cleaned
-
-    explanation = re.sub(r"(?i)^\s*(1\)|2\)|true|false|\*|\#|\-|\`)+", "", explanation).strip()
-    explanation = re.sub(r"(?i)\b(1\)|2\))", "", explanation).strip()
-    explanation = " ".join(explanation.split())[:1000].strip()
-
-    raw_clean = re.sub(r"(?i)[\*\#\`]+", "", raw)
-    raw_clean = re.sub(r"(?i)\b(1\)|2\))", "", raw_clean).strip()
-
-    logger.debug("AI Response Parsed: verdict=%s, explanation=%s", verdict, explanation)
-
-    return verdict, explanation, raw_clean
-
-
-app = Flask(__name__)
-extractor = PageExtractor(headless=True)
 
 
 @app.route("/analyze_content", methods=["POST"])
@@ -173,23 +142,36 @@ def analyze_generic():
     try:
         logger.info("Sending data to model: %s", GOOGLE_AI_MODEL)
         response_text = ""
+
         for chunk in client.models.generate_content_stream(
-            model=GOOGLE_AI_MODEL,
-            contents=contents
+                model=GOOGLE_AI_MODEL,
+                contents=contents,
+                config={
+                    "temperature": 0.1,
+                    "top_p": 0.9,
+                    "max_output_tokens": 1500,
+                    "seed": 0,
+                    "response_mime_type": "application/json",
+                    "response_json_schema": CONTENT_SCHEMA,
+                },
         ):
             if hasattr(chunk, "text") and chunk.text:
                 response_text += chunk.text
 
-        response_text = response_text.strip().replace("```json", "").replace("```", "")
-        response_text = re.sub(r"\\'", "'", response_text)
+        response_text = response_text.strip()
+        data = json.loads(response_text)
 
-        verdict_bool, explanation, raw_ai = parse_ai_response(response_text)
+        verdict_bool = bool(data.get("is_phishing", False))
+        explanation = str(data.get("explanation", "")).strip()
+        raw_ai = response_text
         now = datetime.now(timezone.utc)
+        logger.debug("AI Response Parsed (JSON): verdict=%s, explanation=%s", verdict_bool, explanation)
 
         return jsonify({
             "verdict": verdict_bool,
             "explanation": explanation,
             "raw_ai": raw_ai,
+            "screenshot_base64": screenshot_base64,
             "checked_at": now.isoformat(),
             "expire_time": (now + timedelta(days=EXPIRED_DAYS)).isoformat()
         })
