@@ -350,6 +350,66 @@ def update_history():
     return jsonify({"status": "ok", "saved_for": service, "url_id": url_record.id})
 
 
+@app.route("/delete_url", methods=["DELETE"])
+def delete_url():
+    data = request.get_json(force=True)
+    url = data.get("url")
+
+    if not url:
+        return jsonify({"status": "error", "error": "missing url"}), 400
+
+    try:
+        url_record = URL.query.filter_by(url=url).first()
+        if not url_record:
+            return jsonify({"status": "error", "error": "url_not_found"}), 404
+
+        url_id = url_record.id
+
+        ThreatIntelResult.query.filter_by(url_id=url_id).delete()
+        ContentAnalyzerResult.query.filter_by(url_id=url_id).delete()
+        BehaviorAction.query.filter_by(url_id=url_id).delete()
+        BehaviorSummary.query.filter_by(url_id=url_id).delete()
+
+        db.session.delete(url_record)
+
+        try:
+            domain_name = extract_domain(url)
+            domain_record = Domain.query.filter_by(domain=domain_name).first()
+
+            if domain_record:
+                other_urls_exist = (
+                    db.session.query(URL)
+                    .filter(URL.url.like(f"%{domain_name}%"))
+                    .count()
+                )
+
+                if other_urls_exist == 0:
+                    DomainAnalyzerResult.query.filter_by(domain_id=domain_record.id).delete()
+                    db.session.delete(domain_record)
+
+        except Exception:
+            logger.warning(f"Domain cleanup failed for {url}")
+
+        db.session.commit()
+
+        return jsonify({
+            "status": "ok",
+            "deleted_url": url,
+            "deleted_url_id": url_id
+        })
+
+    except SQLAlchemyError as e:
+        db.session.rollback()
+        logger.exception("DB error during delete_url")
+        return jsonify({"status": "error", "error": "db_error", "detail": str(e)}), 500
+
+    except Exception as e:
+        db.session.rollback()
+        logger.exception("Unexpected error in delete_url")
+        return jsonify({"status": "error", "error": "internal_error", "detail": str(e)}), 500
+
+
+
 @app.route("/health", methods=["GET"])
 def health_check():
     return jsonify({"status": "ok"})
