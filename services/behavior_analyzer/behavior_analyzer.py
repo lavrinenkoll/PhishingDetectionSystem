@@ -59,9 +59,82 @@ DEFAULT_USER_AGENTS = [
 if not GOOGLE_AI_API:
     logger.warning("GOOGLE_AI_API is not set. AI calls will fail if attempted.")
 
+
+ACTIONS_SCHEMA = {
+    "type": "array",
+    "items": {
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "string",
+                "description": "Type of user action: 'click' or 'fill'.",
+                "enum": ["click", "fill"],
+            },
+            "selector": {
+                "type": "string",
+                "description": (
+                    "Usable CSS selector for the target element. "
+                    "Should be directly usable with document.querySelector in the provided HTML."
+                ),
+            },
+
+            "selector_source": {
+                "type": "string",
+                "description": (
+                    "Source used to build the selector: 'id', 'name', 'aria_label', "
+                    "'label_for', 'placeholder', 'other_attribute', or 'text_match'."
+                ),
+                "enum": [
+                    "id",
+                    "name",
+                    "aria_label",
+                    "label_for",
+                    "placeholder",
+                    "other_attribute",
+                    "text_match",
+                ],
+            },
+            "selector_attribute": {
+                "type": "string",
+                "description": (
+                    "If selector_source is attribute-based, this is the exact attribute name "
+                    "as it appears in HTML (e.g. 'id', 'name', 'aria-label', 'for')."
+                ),
+            },
+            "selector_attribute_value": {
+                "type": "string",
+                "description": (
+                    "If selector_source is attribute-based, the exact attribute value as it "
+                    "appears in the HTML source, copied verbatim."
+                ),
+            },
+
+            "field_label": {
+                "type": "string",
+                "description": (
+                    "Human-readable label/description of the element, used for UI. "
+                    "For fill: visible label/placeholder. "
+                    "For click: description of the button/link."
+                ),
+            },
+            "selector_text": {
+                "type": "string",
+                "description": (
+                    "Exact visible text of the element as rendered (e.g. button label or link text)."
+                ),
+            },
+            "value": {
+                "type": "string",
+                "description": "Realistic example value to fill into the field (for action='fill').",
+            },
+        },
+        "required": ["action", "selector", "selector_source", "field_label"],
+        "additionalProperties": False,
+    },
+}
+
+
 _ai_client = None
-
-
 def get_ai_client():
     global _ai_client
     if _ai_client is None:
@@ -226,57 +299,109 @@ def ask_model_for_actions(html: str, screenshot_b64: str) -> Dict[str, Any]:
         client = get_ai_client()
 
         prompt = """
-You are simulating a naive human browsing a webpage.
-From the provided HTML and screenshot, extract ONLY the user actions that are clearly visible **within the current viewport shown in the screenshot**.
-Your task is to mimic what a real human would notice and interact with **at first glance**.
+        You are simulating a naive human browsing a webpage.
+        From the provided HTML and screenshot, extract ONLY the user actions that are clearly visible within the current viewport shown in the screenshot.
+        Your task is to mimic what a real human would notice and interact with at first glance, with the goal of completing the MAIN user intent of the page (e.g. logging in, submitting a form, proceeding to the next step).
 
-Extract the following:
-- Clickable elements: buttons, links, checkboxes, radio buttons, form submission elements that are **fully visible in the screenshot** and appear as clearly interactable.
-- Fillable fields: visible <input>, <textarea>, or other form elements **with a visible label, placeholder, or descriptive context**.
+        Extract the following:
+        - Clickable elements: buttons, links, checkboxes, radio buttons, form submission elements that are fully visible in the screenshot and appear clearly interactable.
+        - Fillable fields: visible <input>, <textarea>, or other form elements with a visible label, placeholder, or descriptive context.
 
-Return a JSON array like this:
-[
-  {"action": "click", "selector_text": "Submit", "selector": "button[type='submit']"},
-  {"action": "fill", "field_label": "Email", "value": "john.doe@example.com", "selector": "input[name='email']"}
-]
+        You must return a list of actions, where each action describes either:
+        - a click on a clearly visible interactive element that is relevant to the main task (e.g. login, continue, submit, confirm), or
+        - filling a clearly visible form field with a realistic example value.
 
-Strict instructions:
+        STRICT SELECTOR RULES (MUST FOLLOW EXACTLY):
 
-1. Use ONLY elements that are **clearly visible in the screenshot** and located **within the currently visible area**.
-2. Include visible **checkboxes** and **radio buttons** where applicable.
-3. Ignore hidden or collapsed content, modal windows, tabs, or sections not currently in the viewport.
-4. For each action:
-    - Include `selector` — a usable, specific CSS selector (e.g. by `id`, `name`, `placeholder`, `label[for]`, `aria-label`).
-    - For `fill` — include:
-        - `field_label`: label text, placeholder, or any visible context.
-        - `value`: a realistic example value (e.g., name, email, card number).
-4a. When selecting the `selector`:
-    - Prefer using `id`, `name`, or `aria-label` attributes written in **ASCII / English characters**, if available.
-    - Avoid using `placeholder` or `label` attributes containing special or non-ASCII characters like smart quotes, right single quotes, or Unicode apostrophes, unless no other selector exists.
-    - If both `name='name'` and `placeholder='Імʼя'` are available — use `input[name='name']`.
-5. Do NOT guess or include actions for elements that are not visible in the screenshot.
-6. Use BOTH HTML structure and screenshot appearance to determine element visibility and intent.
-7. Do NOT repeat actions for the same element.
-8. Choose the `value` for each `fill` action according to the **language and context of the field label**
-9. Always match the value language to the language of the label or placeholder. Do NOT mix languages in the same form.
-10. Order matters: return the actions in the **natural sequence** that a real user would perform them:
-    - First fill all visible fields in order from top to bottom
-    - Then select checkboxes and radio buttons (if visible)
-    - Only after that, perform any submit or navigation clicks (e.g., "Відправити", "Submit", "Continue")
-    - Do NOT click on submission buttons before the form is filled or options selected
+        1. Every selector MUST point to an element that actually exists in the provided HTML.
+           - Think as if you will later call document.querySelector(selector) on that HTML.
+           - Never invent attributes or values that are not present in the HTML.
 
-If there are **no visible user actions at all**, return an empty array: `[]`.
+        2. Selector building priority:
+           - First, try to use id → e.g. <input id="email-input"> → "input#email-input".
+           - If there is no id, use name → e.g. <input name="email"> → "input[name=\"email\"]".
+           - If there is no name, use aria-label → e.g. <button aria-label="Continue"> → "button[aria-label=\"Continue\"]".
+           - For label/field pairs, you may use the id referenced by label[for].
+           - Only if none of the above exist, you may use placeholder or another stable attribute.
 
-Examples of good `fill` values:
-- Email: "example@example.com"
-- Phone: "380991234567"
-- Passport: "KB123456"
-- Card Number: "4000123456789010"
-- Expiry: "12/29"
-- CVV: "123"
+        3. For attribute-based selectors:
+           - Always use double quotes in CSS: [attr="value"].
+           - Copy attribute names and values EXACTLY as in HTML (case-sensitive, including non-ASCII characters).
+           - Do NOT change, translate, or normalize attribute values.
 
-Output ONLY a JSON array. No explanations. No preamble.
-"""
+        4. Avoid fragile selectors:
+           - Do NOT use :nth-child, :contains, long ancestor chains, or complex combinators.
+           - Prefer short, robust selectors like:
+             - "button#login-btn"
+             - "input[name=\"email\"]"
+             - "button[aria-label=\"Continue\"]"
+
+        FOR EACH ACTION YOU MUST PROVIDE:
+
+        1. action: "click" or "fill".
+        2. selector: a usable CSS selector that matches an existing element in the HTML.
+        3. selector_source:
+           - "id"            → selector is primarily based on the id attribute.
+           - "name"          → selector is primarily based on the name attribute.
+           - "aria_label"    → selector is primarily based on the aria-label attribute.
+           - "label_for"     → selector is based on an id referenced by a label[for] attribute.
+           - "placeholder"   → selector is primarily based on the placeholder attribute.
+           - "other_attribute" → selector is based on some other stable attribute.
+           - "text_match"    → selector is based mainly on visible text content.
+        4. If selector_source is one of: "id", "name", "aria_label", "label_for", "placeholder", "other_attribute":
+           - You MUST set selector_attribute to the exact attribute name as in HTML (e.g. "id", "name", "aria-label", "for").
+           - You MUST set selector_attribute_value to the exact attribute value, copied verbatim from HTML.
+        5. If selector_source is "text_match":
+           - selector_attribute and selector_attribute_value may be empty or omitted.
+
+        LABELS AND VALUES:
+
+        1. field_label (for UI display) — REQUIRED for every action:
+           - For action="fill": the user-facing label or placeholder of the field (e.g. "Email", "Номер картки", "Phone number").
+           - For action="click": a short human-readable description of the button or link
+             (e.g. "Submit button", "Кнопка \"Увійти\"", "Continue link").
+        2. selector_text:
+           - For action="click": the exact visible text shown on the button or link, if any.
+           - For action="fill": may be empty or equal to the visible label if appropriate.
+        3. value:
+           - Required ONLY for action="fill".
+           - A realistic example value matching the language and context of field_label.
+           - Examples:
+             - Email: "example@example.com"
+             - Phone: "380991234567"
+             - Passport: "KB123456"
+             - Card Number: "4000123456789010"
+             - Expiry: "12/29"
+             - CVV: "123"
+
+        VISIBILITY, RELEVANCE AND ORDER RULES:
+
+        1. Use ONLY elements that are clearly visible in the screenshot and located within the currently visible area.
+        2. Focus on actions that move the main task forward (e.g. logging in, sending a form, continuing a flow).
+        3. IGNORE purely auxiliary or cosmetic actions that do not change the main flow, such as:
+           - "Show password" / "Hide password" toggles,
+           - theme switches (dark/light mode),
+           - language selectors (unless the ONLY visible primary action is to choose a language),
+           - help/info icons that only open tooltips,
+           - minor UI toggles that do not submit or change form data.
+        4. Include visible checkboxes and radio buttons only if they are clearly part of the main form logic (e.g. "I agree to terms", "Remember me").
+        5. Ignore hidden or collapsed content, modal windows, tabs, or sections not currently in the viewport.
+        6. Do NOT guess or include actions for elements that are not visible in the screenshot.
+        7. Do NOT repeat actions for the same element.
+
+        NATURAL SEQUENCE (ORDER MATTERS):
+
+        1. Your goal is to produce the minimal, realistic sequence of actions that a naive user would take to complete the main intent (e.g. successfully submit the login form once).
+        2. The order must be:
+           - First: all necessary fill actions for the main visible form, from top to bottom.
+           - Then: any mandatory checkboxes or radio buttons directly related to that form (e.g. "I agree").
+           - Finally: exactly one main submit/continue/login click that sends the form or moves to the next step.
+        3. Do NOT include clicks on:
+           - "Show password"/"Hide password" toggles,
+           - secondary links like "Forgot password?", "Create account", unless they are the primary intent of the page,
+           - extra navigation that is not part of the main flow.
+        4. If there are no visible user actions at all related to a main task, you must return an empty list [].
+        """
 
         contents = [prompt, html[:150000]]
         if screenshot_b64.startswith("data:image"):
@@ -289,17 +414,23 @@ Output ONLY a JSON array. No explanations. No preamble.
 
         logger.info("Sending request to model %s for multi-action detection", GOOGLE_AI_MODEL)
         response_text = ""
+
         for chunk in client.models.generate_content_stream(
                 model=GOOGLE_AI_MODEL,
-                contents=contents
+                contents=contents,
+                config={
+                    "temperature": 0.05,
+                    "top_p": 0.9,
+                    "seed": 0,
+                    "response_mime_type": "application/json",
+                    "response_json_schema": ACTIONS_SCHEMA,
+                },
         ):
             if hasattr(chunk, "text") and chunk.text:
                 response_text += chunk.text
 
         logger.info("Model response:\n %s\n----------------", response_text)
         response_text = response_text.strip()
-        response_text = re.sub(r"```json|```", "", response_text).strip()
-        response_text = re.sub(r"\\'", "'", response_text)
 
         try:
             actions = json.loads(response_text)
