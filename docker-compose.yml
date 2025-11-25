@@ -22,14 +22,16 @@ services:
     container_name: pgadmin
     restart: unless-stopped
     ports:
-      - "5050:80"
+      - "${PGADMIN_PORT:-5050}:80"
+    env_file:
+      - .env
     environment:
-      PGADMIN_DEFAULT_EMAIL: admin@example.com
-      PGADMIN_DEFAULT_PASSWORD: admin
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD}
     depends_on:
       - db
     healthcheck:
-      test: [ "CMD-SHELL", "curl -f http://localhost/ || exit 1" ]
+      test: [ "CMD-SHELL", "curl -f http://localhost:${PGADMIN_PORT:-5050}/ || exit 1" ]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -95,16 +97,16 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
-    cpus: 0.5
-    mem_limit: 512M
+    cpus: 4
+    mem_limit: 6G
     cap_drop:
       - ALL
     security_opt:
       - no-new-privileges:true
     tmpfs:
-      - /tmp:rw,size=100m
-      - /home/seluser/.cache:rw,size=50m
-      - /dev/shm:rw,size=256m
+      - /tmp:rw,size=1g
+      - /home/seluser/.cache:rw,size=128m
+      - /dev/shm:rw,size=2g
 
   behavior-analyzer:
     build: ./services/behavior_analyzer
@@ -152,6 +154,25 @@ services:
       - behavior-analyzer
       - history-service
       - db
+
+  ui-service:
+    build: ./services/ui_service
+    container_name: "${UI_SERVICE_CONTAINER_NAME}"
+    env_file:
+      - .env
+    environment:
+      - UI_SERVICE_HOST=${UI_SERVICE_HOST}
+      - UI_SERVICE_PORT=${UI_SERVICE_PORT}
+    ports:
+      - "${UI_SERVICE_PORT}:${UI_SERVICE_PORT}"
+    restart: unless-stopped
+    depends_on:
+      - risk-aggregator
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -fsS http://localhost:${UI_SERVICE_PORT}/_stcore/health || exit 1" ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
 
 volumes:
   pgdata:
